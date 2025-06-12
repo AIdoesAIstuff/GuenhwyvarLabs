@@ -1,0 +1,510 @@
+{
+  "name": "CPA Tax Doc Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "options": {}
+      },
+      "name": "Read Email",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 1,
+      "position": [
+        100,
+        300
+      ],
+      "credentials": {
+        "imap": {
+          "user": "{{$env.IMAP_USER}}",
+          "password": "{{$env.IMAP_PASS}}",
+          "host": "{{$env.IMAP_HOST}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$env.APPROVED_SENDERS.split(',').includes($json.from)}}"
+            }
+          ]
+        }
+      },
+      "name": "Check Approved Sender",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "fromEmail": "no-reply@yourfirm.com"
+        },
+        "subject": "Access Denied",
+        "text": "Unable to access your account, contact support.",
+        "toEmail": "={{$json.from}}"
+      },
+      "name": "Sender Not Approved",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        500,
+        200
+      ],
+      "credentials": {
+        "smtp": {
+          "user": "{{$env.SMTP_USER}}",
+          "password": "{{$env.SMTP_PASS}}",
+          "host": "{{$env.SMTP_HOST}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "SELECT \"clientId\" FROM \"clients\" WHERE \"email\"={{$json.from}}"
+      },
+      "name": "Lookup Client",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        500,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "connectionString": "{{$env.DB_CONN}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.length > 0}}"
+            }
+          ]
+        }
+      },
+      "name": "Client Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        700,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "fromEmail": "no-reply@yourfirm.com"
+        },
+        "subject": "Account Not Found",
+        "text": "No account found for this address.",
+        "toEmail": "={{$json.from}}"
+      },
+      "name": "No Account Reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "user": "{{$env.SMTP_USER}}",
+          "password": "{{$env.SMTP_PASS}}",
+          "host": "{{$env.SMTP_HOST}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const out=[]; for (const [k,d] of Object.entries(item.binary||{})) { out.push({json:{...item.json}, binary:{data:d}}); } return out;"
+      },
+      "name": "Split Attachments",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        900,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "command": "tesseract {{$binary.data.fileName}} stdout"
+      },
+      "name": "Run Tesseract",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        500
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://vision.googleapis.com/v1/images:annotate?key={{$env.OCR_API_KEY}}",
+        "method": "POST",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "requests",
+              "value": "=[{ 'image': { 'content': $binary.data.data.toString('base64') }, 'features': [{ 'type': 'TEXT_DETECTION' }] }]"
+            }
+          ]
+        }
+      },
+      "name": "Google OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const text= $json.text || $node['Run Tesseract'].json.stdout;\nconst ssn=(/\\d{3}-\\d{2}-\\d{4}/.exec(text)||[])[0]||'';\nconst year=(/20\\d{2}/.exec(text)||[])[0]||'';\nconst income=((/income[:\\s]+\\$?(\\d+[,.]?\\d*)/i.exec(text)||[])[1])||'';\nconst deductions=((/deductions?[:\\s]+\\$?(\\d+[,.]?\\d*)/i.exec(text)||[])[1])||'';\nreturn {json:{ssn, taxYear:year, income, deductions}};"
+      },
+      "name": "Parse OCR Text",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1300,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO tax_updates (clientId, ssn, taxYear, dataJson, status) VALUES ({{$node['Lookup Client'].json[0].clientId}}, {{$json.ssn}}, {{$json.taxYear}}, '{{JSON.stringify($json)}}', 'pending') RETURNING id;"
+      },
+      "name": "Insert Staging Row",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1500,
+        600
+      ],
+      "credentials": {
+        "postgres": {
+          "connectionString": "{{$env.DB_CONN}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "webhookUri": "{{$env.SLACK_WEBHOOK}}",
+        "bodyParametersUi": {
+          "parameter": [
+            {
+              "name": "text",
+              "value": "New tax update for {{$node['Lookup Client'].json[0].clientId}} pending your review"
+            }
+          ]
+        }
+      },
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "path": "approve-tax",
+        "httpMethod": "POST"
+      },
+      "name": "Approval Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.action}}",
+              "operation": "equal",
+              "value2": "approve"
+            }
+          ]
+        }
+      },
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2100,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "query": "UPDATE tax_updates SET status='rejected' WHERE id={{$json.recordId}}"
+      },
+      "name": "Mark Rejected",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2300,
+        500
+      ],
+      "credentials": {
+        "postgres": {
+          "connectionString": "{{$env.DB_CONN}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {
+          "fromEmail": "no-reply@yourfirm.com"
+        },
+        "subject": "Submission Rejected",
+        "text": "Your submission needs correction.",
+        "toEmail": "={{$node['Lookup Client'].json[0].email}}"
+      },
+      "name": "Email Rejected",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [
+        2500,
+        500
+      ],
+      "credentials": {
+        "smtp": {
+          "user": "{{$env.SMTP_USER}}",
+          "password": "{{$env.SMTP_PASS}}",
+          "host": "{{$env.SMTP_HOST}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "UPDATE tax_updates SET status='approved' WHERE id={{$json.recordId}}"
+      },
+      "name": "Mark Approved",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2300,
+        700
+      ],
+      "credentials": {
+        "postgres": {
+          "connectionString": "{{$env.DB_CONN}}"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "INSERT INTO client_tax_records (clientId, dataJson) SELECT clientId, dataJson FROM tax_updates WHERE id={{$json.recordId}}"
+      },
+      "name": "Write Final Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        2500,
+        700
+      ],
+      "credentials": {
+        "postgres": {
+          "connectionString": "{{$env.DB_CONN}}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Read Email": {
+      "main": [
+        [
+          {
+            "node": "Check Approved Sender",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Approved Sender": {
+      "main": [
+        [
+          {
+            "node": "Lookup Client",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sender Not Approved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Client": {
+      "main": [
+        [
+          {
+            "node": "Client Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Client Found?": {
+      "main": [
+        [
+          {
+            "node": "Split Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Account Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Attachments": {
+      "main": [
+        [
+          {
+            "node": "Run Tesseract",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Tesseract": {
+      "main": [
+        [
+          {
+            "node": "Parse OCR Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google OCR": {
+      "main": [
+        [
+          {
+            "node": "Parse OCR Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse OCR Text": {
+      "main": [
+        [
+          {
+            "node": "Insert Staging Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Staging Row": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Slack": {
+      "main": [
+        [
+          {
+            "node": "Approval Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Webhook": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Mark Approved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Rejected": {
+      "main": [
+        [
+          {
+            "node": "Email Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Approved": {
+      "main": [
+        [
+          {
+            "node": "Write Final Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
