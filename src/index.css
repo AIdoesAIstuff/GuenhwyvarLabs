@@ -1,0 +1,15 @@
+body {
+  font-family: Arial, sans-serif;
+  text-align: center;
+  padding: 2rem;
+}
+
+button {
+  margin: 1rem;
+  padding: 1rem 2rem;
+  font-size: 1rem;
+}
+
+.album-card img {
+  max-width: 200px;
+}
