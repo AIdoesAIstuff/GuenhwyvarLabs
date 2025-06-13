@@ -19,6 +19,13 @@ pip install -r entertainment_recommender/requirements.txt
 python entertainment_recommender/app.py
 ```
 
+Alternatively, you can run the app in Docker:
+
+```bash
+docker build -t entertainment_recommender .
+docker run -p 5000:5000 entertainment_recommender
+```
+
 The application will start on [http://localhost:5000](http://localhost:5000). Open this URL in your browser to answer the questions and receive a recommendation.
 
 The app will attempt to fetch a random result from the iTunes Search API based on your chosen mood, medium, and genre. If the request fails, it falls back to a small built-in list of suggestions.
